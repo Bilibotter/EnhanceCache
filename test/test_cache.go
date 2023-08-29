@@ -1,4 +1,4 @@
-package stubbing
+package test
 
 import (
 	"sort"
@@ -8,16 +8,16 @@ import (
 )
 
 var (
-	caches = make([]*StubbingCache, 0)
+	caches = make([]*testCache, 0)
 	wakeup chan bool
 	lock   sync.Mutex
 	once   sync.Once
 )
 
-type StubbingCache struct {
+type testCache struct {
 	defaultExpiration time.Duration
 	nextScan          time.Time
-	items             sync.Map // just like map[string]*Item
+	Items             sync.Map // just like map[string]*Item
 }
 
 type Item struct {
@@ -26,14 +26,14 @@ type Item struct {
 	Expiration time.Time
 }
 
-func NewCache(expired time.Duration) *StubbingCache {
+func NewCache(expired time.Duration) *testCache {
 	once.Do(func() {
 		wakeup = make(chan bool, 1)
 		go clearExpired()
 	})
 
-	cache := &StubbingCache{
-		items:             sync.Map{},
+	cache := &testCache{
+		Items:             sync.Map{},
 		nextScan:          time.Now().Add(expired),
 		defaultExpiration: expired,
 	}
@@ -55,8 +55,8 @@ func NewCache(expired time.Duration) *StubbingCache {
 	return cache
 }
 
-func (ec *StubbingCache) Get(key string) (any, bool) {
-	wrap, exist := ec.items.Load(key)
+func (ec *testCache) Get(key string) (any, bool) {
+	wrap, exist := ec.Items.Load(key)
 
 	if !exist {
 		return nil, false
@@ -68,13 +68,13 @@ func (ec *StubbingCache) Get(key string) (any, bool) {
 	}
 
 	if atomic.CompareAndSwapInt32(&item.status, 0, 1) {
-		ec.items.Delete(key)
+		ec.Items.Delete(key)
 		atomic.StoreInt32(&item.status, 2)
 		return nil, false
 	}
 
 	// all operations need to wait for the deletion to complete
-	// extreme short time to wait, only trigger in stubbing
+	// extreme short time to wait, only trigger in test
 	for status := atomic.LoadInt32(&item.status); status != 2; {
 		status = atomic.LoadInt32(&item.status)
 	}
@@ -82,12 +82,12 @@ func (ec *StubbingCache) Get(key string) (any, bool) {
 	return nil, false
 }
 
-func (ec *StubbingCache) Delete(key string) {
+func (ec *testCache) Delete(key string) {
 	ec.Get(key)
-	ec.items.Delete(key)
+	ec.Items.Delete(key)
 }
 
-func (ec *StubbingCache) Set(key string, value any, expiration time.Duration) {
+func (ec *testCache) Set(key string, value any, expiration time.Duration) {
 	ec.Get(key)
 
 	item := &Item{
@@ -95,10 +95,10 @@ func (ec *StubbingCache) Set(key string, value any, expiration time.Duration) {
 		Expiration: time.Now().Add(expiration),
 	}
 
-	ec.items.Store(key, item)
+	ec.Items.Store(key, item)
 }
 
-func (ec *StubbingCache) LoadOrStore(key string, value any) (any, bool) {
+func (ec *testCache) LoadOrStore(key string, value any) (any, bool) {
 	if target, exist := ec.Get(key); exist {
 		return target, false
 	}
@@ -108,7 +108,7 @@ func (ec *StubbingCache) LoadOrStore(key string, value any) (any, bool) {
 		Expiration: time.Now().Add(ec.defaultExpiration),
 	}
 
-	warp, load := ec.items.LoadOrStore(key, item)
+	warp, load := ec.Items.LoadOrStore(key, item)
 	item = warp.(*Item)
 	return item.Object, load
 }
@@ -123,7 +123,7 @@ func clearExpired() {
 			if cache.nextScan.After(time.Now()) {
 				continue
 			}
-			cache.items.Range(func(key, value any) bool {
+			cache.Items.Range(func(key, value any) bool {
 				cache.Get(key.(string))
 				return true
 			})

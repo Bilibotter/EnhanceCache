@@ -1,4 +1,4 @@
-package core
+package stubbing
 
 import (
 	"sort"
@@ -8,16 +8,16 @@ import (
 )
 
 var (
-	caches = make([]*EnhanceCache, 0)
+	caches = make([]*stubbingCache, 0)
 	wakeup chan bool
 	lock   sync.Mutex
 	once   sync.Once
 )
 
-type EnhanceCache struct {
+type stubbingCache struct {
 	defaultExpiration time.Duration
 	nextScan          time.Time
-	items             sync.Map // just like map[string]*Item
+	Items             sync.Map // just like map[string]*Item
 }
 
 type Item struct {
@@ -26,14 +26,14 @@ type Item struct {
 	Expiration time.Time
 }
 
-func NewCache(expired time.Duration) *EnhanceCache {
+func NewCache(expired time.Duration) *stubbingCache {
 	once.Do(func() {
 		wakeup = make(chan bool, 1)
 		go clearExpired()
 	})
 
-	cache := &EnhanceCache{
-		items:             sync.Map{},
+	cache := &stubbingCache{
+		Items:             sync.Map{},
 		nextScan:          time.Now().Add(expired),
 		defaultExpiration: expired,
 	}
@@ -55,8 +55,8 @@ func NewCache(expired time.Duration) *EnhanceCache {
 	return cache
 }
 
-func (ec *EnhanceCache) Get(key string) (any, bool) {
-	wrap, exist := ec.items.Load(key)
+func (ec *stubbingCache) Get(key string) (any, bool) {
+	wrap, exist := ec.Items.Load(key)
 
 	if !exist {
 		return nil, false
@@ -68,7 +68,7 @@ func (ec *EnhanceCache) Get(key string) (any, bool) {
 	}
 
 	if atomic.CompareAndSwapInt32(&item.status, 0, 1) {
-		ec.items.Delete(key)
+		ec.Items.Delete(key)
 		atomic.StoreInt32(&item.status, 2)
 		return nil, false
 	}
@@ -82,12 +82,12 @@ func (ec *EnhanceCache) Get(key string) (any, bool) {
 	return nil, false
 }
 
-func (ec *EnhanceCache) Delete(key string) {
+func (ec *stubbingCache) Delete(key string) {
 	ec.Get(key)
-	ec.items.Delete(key)
+	ec.Items.Delete(key)
 }
 
-func (ec *EnhanceCache) Set(key string, value any, expiration time.Duration) {
+func (ec *stubbingCache) Set(key string, value any, expiration time.Duration) {
 	ec.Get(key)
 
 	item := &Item{
@@ -95,10 +95,10 @@ func (ec *EnhanceCache) Set(key string, value any, expiration time.Duration) {
 		Expiration: time.Now().Add(expiration),
 	}
 
-	ec.items.Store(key, item)
+	ec.Items.Store(key, item)
 }
 
-func (ec *EnhanceCache) LoadOrStore(key string, value any) (any, bool) {
+func (ec *stubbingCache) LoadOrStore(key string, value any) (any, bool) {
 	if target, exist := ec.Get(key); exist {
 		return target, false
 	}
@@ -108,13 +108,9 @@ func (ec *EnhanceCache) LoadOrStore(key string, value any) (any, bool) {
 		Expiration: time.Now().Add(ec.defaultExpiration),
 	}
 
-	warp, load := ec.items.LoadOrStore(key, item)
+	warp, load := ec.Items.LoadOrStore(key, item)
 	item = warp.(*Item)
 	return item.Object, load
-}
-
-func (ec *EnhanceCache) Flush() {
-	ec.items = sync.Map{}
 }
 
 func clearExpired() {
@@ -127,7 +123,7 @@ func clearExpired() {
 			if cache.nextScan.After(time.Now()) {
 				continue
 			}
-			cache.items.Range(func(key, value any) bool {
+			cache.Items.Range(func(key, value any) bool {
 				cache.Get(key.(string))
 				return true
 			})
