@@ -1,23 +1,26 @@
-package test
+package EnhanceCache
 
 import (
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
 var (
-	caches = make([]*testCache, 0)
+	caches = make([]any, 0)
 	wakeup chan bool
 	lock   sync.Mutex
 	once   sync.Once
 )
 
-type testCache struct {
+type Cleanable interface {
+	clean() (nextCleanTime time.Time)
+}
+
+type EnhanceCache[K string, V any] struct {
 	defaultExpiration time.Duration
 	nextScan          time.Time
-	Items             sync.Map // just like map[string]*Item
+	items             sync.Map // just like map[string]*Item
 }
 
 type Item struct {
@@ -26,14 +29,14 @@ type Item struct {
 	Expiration time.Time
 }
 
-func NewCache(expired time.Duration) *testCache {
+func NewCache[V any](expired time.Duration) *EnhanceCache[string, V] {
 	once.Do(func() {
 		wakeup = make(chan bool, 1)
 		go clearExpired()
 	})
 
-	cache := &testCache{
-		Items:             sync.Map{},
+	cache := &EnhanceCache[string, V]{
+		items:             sync.Map{},
 		nextScan:          time.Now().Add(expired),
 		defaultExpiration: expired,
 	}
@@ -42,10 +45,12 @@ func NewCache(expired time.Duration) *testCache {
 	defer lock.Unlock()
 
 	caches = append(caches, cache)
-	// this will lead to clear the cache with a short expiration time first
-	sort.SliceStable(caches, func(i, j int) bool {
-		return caches[i].defaultExpiration < caches[j].defaultExpiration
-	})
+	//// this will lead to clear the cache with a short expiration time first
+	//sort.SliceStable(caches, func(i, j int) bool {
+	//	c1 := caches[i].(*EnhanceCache[string, V])
+	//	c2 := caches[i].(*EnhanceCache[string, V])
+	//	return caches[i].defaultExpiration < caches[j].defaultExpiration
+	//})
 
 	select {
 	case wakeup <- true:
@@ -55,11 +60,11 @@ func NewCache(expired time.Duration) *testCache {
 	return cache
 }
 
-func (ec *testCache) Get(key string) (any, bool) {
-	wrap, exist := ec.Items.Load(key)
+func (ec *EnhanceCache[K, V]) Get(key string) (v V, exist bool) {
+	wrap, exist := ec.items.Load(key)
 
 	if !exist {
-		return nil, false
+		return
 	}
 
 	item := wrap.(*Item)
@@ -68,9 +73,9 @@ func (ec *testCache) Get(key string) (any, bool) {
 	}
 
 	if atomic.CompareAndSwapInt32(&item.status, 0, 1) {
-		ec.Items.Delete(key)
+		ec.items.Delete(key)
 		atomic.StoreInt32(&item.status, 2)
-		return nil, false
+		return
 	}
 
 	// all operations need to wait for the deletion to complete
@@ -79,15 +84,15 @@ func (ec *testCache) Get(key string) (any, bool) {
 		status = atomic.LoadInt32(&item.status)
 	}
 
-	return nil, false
+	return
 }
 
-func (ec *testCache) Delete(key string) {
+func (ec *EnhanceCache[K, V]) Delete(key string) {
 	ec.Get(key)
-	ec.Items.Delete(key)
+	ec.items.Delete(key)
 }
 
-func (ec *testCache) Set(key string, value any, expiration time.Duration) {
+func (ec *EnhanceCache[K, V]) Set(key string, value V, expiration time.Duration) {
 	ec.Get(key)
 
 	item := &Item{
@@ -95,10 +100,10 @@ func (ec *testCache) Set(key string, value any, expiration time.Duration) {
 		Expiration: time.Now().Add(expiration),
 	}
 
-	ec.Items.Store(key, item)
+	ec.items.Store(key, item)
 }
 
-func (ec *testCache) LoadOrStore(key string, value any) (any, bool) {
+func (ec *EnhanceCache[K, V]) LoadOrStore(key string, value V) (V, bool) {
 	if target, exist := ec.Get(key); exist {
 		return target, false
 	}
@@ -108,9 +113,25 @@ func (ec *testCache) LoadOrStore(key string, value any) (any, bool) {
 		Expiration: time.Now().Add(ec.defaultExpiration),
 	}
 
-	warp, load := ec.Items.LoadOrStore(key, item)
+	warp, load := ec.items.LoadOrStore(key, item)
 	item = warp.(*Item)
-	return item.Object, load
+	return item.Object.(V), load
+}
+
+func (ec *EnhanceCache[K, V]) clean() (nextCleanTime time.Time) {
+	if ec.nextScan.After(time.Now()) {
+		return ec.nextScan
+	}
+	ec.items.Range(func(key, value any) bool {
+		ec.Get(key.(string))
+		return true
+	})
+	ec.nextScan = time.Now().Add(ec.defaultExpiration)
+	return ec.nextScan
+}
+
+func (ec *EnhanceCache[K, V]) Flush() {
+	ec.items = sync.Map{}
 }
 
 func clearExpired() {
@@ -118,18 +139,15 @@ func clearExpired() {
 	time.Sleep(10 * time.Second)
 	for {
 		lock.Lock()
-		nearest := time.Now()
+		nearest := time.Now().Add(time.Hour)
 		for _, cache := range caches {
-			if cache.nextScan.After(time.Now()) {
-				continue
+			clearer, ok := cache.(Cleanable)
+			if !ok {
+				panic("cache must implement Clearable interface")
 			}
-			cache.Items.Range(func(key, value any) bool {
-				cache.Get(key.(string))
-				return true
-			})
-			cache.nextScan = time.Now().Add(cache.defaultExpiration)
-			if cache.nextScan.Before(nearest) {
-				nearest = cache.nextScan
+			nextScan := clearer.clean()
+			if nextScan.Before(nearest) {
+				nearest = nextScan
 			}
 		}
 		// it's unsafe to use defer to unlock in loop
